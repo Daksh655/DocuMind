@@ -1,0 +1,9 @@
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+langchain==0.1.0
+langchain-google-genai==0.0.3
+psycopg2-binary==2.9.9
+pypdf==3.17.4
+python-multipart
+sqlalchemy
+pgvector

@@ -1,0 +1,99 @@
+version: "3.9"
+
+# ==============================================================
+# DocuMind – Docker Compose Orchestration
+# Services: db, backend, ai-engine, frontend
+# ==============================================================
+
+services:
+
+  # ── 1. PostgreSQL 15 + pgvector ─────────────────────────────
+  db:
+    image: ankane/pgvector:latest
+    container_name: documind_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: documind_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: documind_db
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Port is intentionally NOT published to the host; only internal services reach it.
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U documind_user -d documind_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - documind_net
+
+  # ── 2. Java Spring Boot Backend ─────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: documind_backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      DB_URL: jdbc:postgresql://db:5432/documind_db
+      DB_USER: documind_user
+      DB_PASSWORD: ${DB_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+    ports:
+      - "8080:8080"
+    networks:
+      - documind_net
+
+  # ── 3. Python FastAPI AI Engine ──────────────────────────────
+  ai-engine:
+    build:
+      context: ./ai-engine
+      dockerfile: Dockerfile
+    container_name: documind_ai_engine
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql://documind_user:${DB_PASSWORD}@db:5432/documind_db
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+    ports:
+      - "8000:8000"
+    networks:
+      - documind_net
+
+  # ── 4. React + Vite Frontend ─────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: documind_frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      VITE_API_BASE_URL: http://backend:8080/api
+    ports:
+      - "5173:5173"
+    networks:
+      - documind_net
+
+# ── Named Volumes ────────────────────────────────────────────
+volumes:
+  pgdata:
+    driver: local
+
+# ── Internal Network ─────────────────────────────────────────
+networks:
+  documind_net:
+    driver: bridge
