@@ -49,7 +49,7 @@ def startup_db_test():
             # Check connection
             connection.execute(text("SELECT 1"))
             logger.info("Successfully connected to the database.")
-            
+
             # Check or enable pgvector extension if superuser permissions allow,
             # or simply verify its existence.
             try:
@@ -79,7 +79,7 @@ def process_document_background(file_id: int, file_path: str):
         # 2. Chunk text (RecursiveCharacterTextSplitter)
         # 3. Create GoogleGeminiEmbeddings
         # 4. Store vectors in pgvector table
-        # 5. Call backend to update status to 'PROCESSED'
+        # 5. Call backend to update status to 'PROCESSED'w
         logger.info(f"Finished processing document ID: {file_id}")
     except Exception as e:
         logger.error(f"Error processing document {file_id}: {e}")
@@ -96,13 +96,13 @@ async def ingest_document(
     """
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
-        
+
     logger.info(f"Ingesting file ID: {file_id}, Name: {file.filename}")
-    
+
     # Placeholder: In a complete RAG, we would save the uploaded file temporarily or read it directly.
     # Start background processing task
     background_tasks.add_task(process_document_background, file_id, file.filename)
-    
+
     return {"status": "indexed", "chunks": 5, "file_id": file_id}
 
 @app.post("/api/ai/chat", response_model=ChatResponse)
@@ -112,14 +112,14 @@ async def chat(query_data: ChatQuery):
     retrieves context, and prompts Gemini for a factual, constrained response.
     """
     logger.info(f"Chat request received from user {query_data.user_id} with query: {query_data.query}")
-    
+
     # Placeholder return simulating RAG results
     simulated_answer = (
         "Based on the course materials: This is a simulated response from Gemini. "
         "The RAG workflow retrieves context matching the query from pgvector, "
         "and sends it along with the question to Gemini API."
     )
-    
+
     return ChatResponse(
         answer=simulated_answer,
         sources=["Syllabus_Week_1.pdf - page 2", "Lecture_Notes_Intro.pdf - page 5"]
@@ -136,7 +136,7 @@ def health_check():
                 db_status = "connected"
         except Exception:
             db_status = "disconnected"
-            
+
     return {
         "status": "ok",
         "database": db_status,

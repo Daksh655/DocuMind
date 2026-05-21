@@ -7,6 +7,15 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
+import org.springframework.web.client.RestTemplate;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.util.MultiValueMap;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.core.io.FileSystemResource;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.ResponseEntity;
+
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -23,7 +32,7 @@ public class DocumentService {
     @Autowired
     private UserService userService;
 
-    private final Path rootPath = Paths.get("uploads");
+    private final Path rootPath = Paths.get("/tmp/uploads");
 
     public DocumentService() {
         try {
@@ -52,7 +61,35 @@ public class DocumentService {
         Files.copy(file.getInputStream(), finalPath);
 
         Document doc = new Document(user, originalFilename, finalPath.toAbsolutePath().toString());
-        return documentRepository.save(doc);
+
+        Document savedDoc = documentRepository.save(doc);
+
+        try {
+            RestTemplate restTemplate = new RestTemplate();
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+
+            MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+            body.add("file_id", savedDoc.getId().toString());
+            body.add("file", new FileSystemResource(finalPath.toFile()));
+
+            HttpEntity<MultiValueMap<String, Object>> requestEntity = new HttpEntity<>(body, headers);
+
+            // Call Python using its internal Docker network name
+            ResponseEntity<String> response = restTemplate.postForEntity("http://documind_ai_engine:8000/api/ai/ingest", requestEntity, String.class);
+
+            // If Python successfully receives it, immediately mark as PROCESSED
+            if (response.getStatusCode().is2xxSuccessful()) {
+                savedDoc.setStatus(Document.Status.PROCESSED);
+                return documentRepository.save(savedDoc);
+            }
+        } catch (Exception e) {
+            System.err.println("Failed to contact AI Engine: " + e.getMessage());
+            savedDoc.setStatus(Document.Status.FAILED);
+            return documentRepository.save(savedDoc);
+        }
+
+        return savedDoc;
     }
 
     public List<Document> getUserDocuments(Long userId) {

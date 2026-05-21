@@ -1,5 +1,6 @@
 package com.documind.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -8,10 +9,6 @@ import org.hibernate.annotations.CreationTimestamp;
 
 import java.time.LocalDateTime;
 
-/**
- * Represents a PDF document uploaded by a user.
- * The AI engine updates the status field as it processes the file.
- */
 @Entity
 @Table(name = "documents")
 @Getter
@@ -20,16 +17,17 @@ import java.time.LocalDateTime;
 public class Document {
 
     public enum Status {
-        PENDING,    // Uploaded but not yet processed by the AI engine
-        PROCESSED,  // Successfully chunked and embedded
-        FAILED      // Processing error – see AI engine logs
+        PENDING,
+        PROCESSED,
+        FAILED
     }
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    /** Owner of this document. */
+    // 2. ADD THIS ANNOTATION HERE to stop the crash and hide the password
+    @JsonIgnore
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "user_id", nullable = false)
     private User user;
@@ -37,10 +35,6 @@ public class Document {
     @Column(name = "file_name", nullable = false)
     private String fileName;
 
-    /**
-     * Local filesystem path (or future S3 key).
-     * e.g. /uploads/42/lecture-notes.pdf
-     */
     @Column(name = "file_path", nullable = false)
     private String filePath;
 
