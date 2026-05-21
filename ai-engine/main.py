@@ -4,20 +4,25 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTa
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
-import sqlalchemy
 from sqlalchemy import create_engine, text
+import google.generativeai as genai
+from pypdf import PdfReader
+import requests
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ai-engine")
 
-# Load configuration from environment variables
+# Load configuration
 DATABASE_URL = os.getenv("DATABASE_URL")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+# Configure Gemini
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+
 app = FastAPI(title="DocuMind AI Engine", version="1.0.0")
 
-# Enable CORS for frontend integration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
@@ -26,41 +31,36 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Database Engine initialization
 engine = None
 if DATABASE_URL:
     try:
-        # Standard sqlalchemy engine to test connection
         engine = create_engine(DATABASE_URL)
         logger.info("Database URL parsed successfully.")
     except Exception as e:
         logger.error(f"Error parsing database URL: {e}")
-else:
-    logger.warning("DATABASE_URL environment variable is not set.")
 
 @app.on_event("startup")
 def startup_db_test():
-    """Verify database connection and the presence of pgvector extension on startup."""
     if not engine:
-        logger.error("Startup database check skipped: engine not initialized.")
         return
     try:
         with engine.connect() as connection:
-            # Check connection
-            connection.execute(text("SELECT 1"))
-            logger.info("Successfully connected to the database.")
+            connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
 
-            # Check or enable pgvector extension if superuser permissions allow,
-            # or simply verify its existence.
-            try:
-                connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-                logger.info("pgvector extension check/creation successful.")
-            except Exception as vector_err:
-                logger.warning(f"Could not initialize pgvector extension: {vector_err}")
+            # Auto-create the vector table to store PDF chunks
+            connection.execute(text("""
+                CREATE TABLE IF NOT EXISTS document_chunks (
+                    id SERIAL PRIMARY KEY,
+                    document_id INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    embedding vector(768)
+                )
+            """))
+            connection.commit()
+            logger.info("Database and vector tables are ready!")
     except Exception as e:
-        logger.error(f"Failed to connect to the database on startup: {e}")
+        logger.error(f"Database startup error: {e}")
 
-# Request/Response schemas
 class ChatQuery(BaseModel):
     query: str
     user_id: int
@@ -70,17 +70,54 @@ class ChatResponse(BaseModel):
     answer: str
     sources: List[str]
 
-# Background tasks placeholder for actual parsing, chunking, and embedding logic
-def process_document_background(file_id: int, file_path: str):
-    logger.info(f"Background processing started for document ID: {file_id}")
+# --- 1. THE EXTRACTOR & EMBEDDING GENERATOR ---
+def process_document_background(file_id: int, file_path: str, pdf_bytes: bytes):
+    logger.info(f"AI Engine started processing document ID: {file_id}")
     try:
-        # In production RAG:
-        # 1. Load PDF (PyPDFLoader)
-        # 2. Chunk text (RecursiveCharacterTextSplitter)
-        # 3. Create GoogleGeminiEmbeddings
-        # 4. Store vectors in pgvector table
-        # 5. Call backend to update status to 'PROCESSED'w
-        logger.info(f"Finished processing document ID: {file_id}")
+        # Save temporary file to read it
+        temp_path = f"/tmp/{file_path}"
+        with open(temp_path, "wb") as f:
+            f.write(pdf_bytes)
+
+        # Read the PDF text
+        reader = PdfReader(temp_path)
+        full_text = ""
+        for page in reader.pages:
+            if page.extract_text():
+                full_text += page.extract_text() + "\n"
+
+        # Chop text into smaller 1000-character chunks
+        chunk_size = 1000
+        chunks = [full_text[i:i+chunk_size] for i in range(0, len(full_text), chunk_size)]
+
+        with engine.connect() as conn:
+            for chunk in chunks:
+                if len(chunk.strip()) < 10:
+                    continue
+
+                # Ask Gemini to turn the text into numbers (vectors)
+                embedding_result = genai.embed_content(
+                    model="models/gemini-embedding-001",
+                    content=chunk,
+                    task_type="retrieval_document",
+                    output_dimensionality=768
+                )
+
+                # Save the chunk and its vector to PostgreSQL
+                conn.execute(
+                    text("INSERT INTO document_chunks (document_id, content, embedding) VALUES (:doc_id, :content, :embedding)"),
+                    {"doc_id": file_id, "content": chunk, "embedding": str(embedding_result['embedding'])}
+                )
+            conn.commit()
+
+        logger.info(f"Successfully processed and embedded document ID: {file_id}")
+
+        # Let Java know we finished! (Optional callback loop)
+        try:
+            requests.put(f"http://documind_backend:8080/api/documents/{file_id}/complete")
+        except:
+            pass # Ignore if Java doesn't have this endpoint yet
+
     except Exception as e:
         logger.error(f"Error processing document {file_id}: {e}")
 
@@ -90,55 +127,61 @@ async def ingest_document(
     file_id: int = Form(...),
     file: UploadFile = File(...)
 ):
-    """
-    Ingests and indexes a PDF document for semantic search.
-    Expects document file_id and PDF file.
-    """
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+    pdf_bytes = await file.read()
+    background_tasks.add_task(process_document_background, file_id, file.filename, pdf_bytes)
+    return {"status": "indexed", "file_id": file_id}
 
-    logger.info(f"Ingesting file ID: {file_id}, Name: {file.filename}")
 
-    # Placeholder: In a complete RAG, we would save the uploaded file temporarily or read it directly.
-    # Start background processing task
-    background_tasks.add_task(process_document_background, file_id, file.filename)
-
-    return {"status": "indexed", "chunks": 5, "file_id": file_id}
-
+# --- 2. THE GEMINI BRAIN ---
 @app.post("/api/ai/chat", response_model=ChatResponse)
 async def chat(query_data: ChatQuery):
-    """
-    RAG chat endpoint. Performs similarity search on query embeddings,
-    retrieves context, and prompts Gemini for a factual, constrained response.
-    """
-    logger.info(f"Chat request received from user {query_data.user_id} with query: {query_data.query}")
+    if not GEMINI_API_KEY:
+        raise HTTPException(status_code=500, detail="Gemini API key missing.")
 
-    # Placeholder return simulating RAG results
-    simulated_answer = (
-        "Based on the course materials: This is a simulated response from Gemini. "
-        "The RAG workflow retrieves context matching the query from pgvector, "
-        "and sends it along with the question to Gemini API."
-    )
+    # 1. Turn the user's question into a vector
+    question_embedding = genai.embed_content(
+        model="models/gemini-embedding-001",
+        content=query_data.query,
+        task_type="retrieval_query",
+        output_dimensionality=768
+    )['embedding']
+
+    # 2. Search PostgreSQL for the closest matching PDF paragraphs
+    context_text = ""
+    with engine.connect() as conn:
+        results = conn.execute(
+            text("""
+                SELECT content FROM document_chunks
+                ORDER BY embedding <-> :q_embed
+                LIMIT 3
+            """),
+            {"q_embed": str(question_embedding)}
+        ).fetchall()
+
+        for row in results:
+            context_text += row[0] + "\n---\n"
+
+    # 3. Give the paragraphs and the question to Gemini to formulate an answer
+    ai_model = genai.GenerativeModel('gemini-2.5-flash')
+    prompt = f"""
+        You are a helpful, conversational, and intelligent assistant for the FluxWork platform.
+        Your goal is to help the user understand their uploaded document while maintaining a natural, friendly chat.
+
+    Context extracted from the document:
+    {context_text}
+
+    Instructions:
+    1. Answer the user's question directly and clearly using the provided context.
+    2. Provide the exact amount of detail needed—be thorough but concise. Avoid unnecessary rambling or one-word answers.
+    3. If the context does not contain the exact answer, politely mention that it is not in the document, but use your general knowledge to provide a helpful answer anyway.
+    4. If the user asks for a summary, give a well-structured, easy-to-read overview of the main points.
+
+    Question: {query_data.query}
+    """
+
+    response = ai_model.generate_content(prompt)
 
     return ChatResponse(
-        answer=simulated_answer,
-        sources=["Syllabus_Week_1.pdf - page 2", "Lecture_Notes_Intro.pdf - page 5"]
+        answer=response.text,
+        sources=["Extracted from PDF Database"]
     )
-
-@app.get("/health")
-def health_check():
-    """Simple health endpoint returning the status of the service."""
-    db_status = "unconfigured"
-    if engine:
-        try:
-            with engine.connect() as conn:
-                conn.execute(text("SELECT 1"))
-                db_status = "connected"
-        except Exception:
-            db_status = "disconnected"
-
-    return {
-        "status": "ok",
-        "database": db_status,
-        "gemini_api_key_configured": bool(GEMINI_API_KEY)
-    }
