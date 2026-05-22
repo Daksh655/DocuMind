@@ -94,8 +94,8 @@ def process_document_background(file_id: int, file_path: str, pdf_bytes: bytes):
 
         # 2. Look at each image and extract the English text visually
         for page in pages:
-            text = pytesseract.image_to_string(page)
-            full_text += text + "\n"
+            text_extracted = pytesseract.image_to_string(page)
+            full_text += text_extracted + "\n"
 
         # Chop text into smaller 1000-character chunks
         chunk_size = 1000
@@ -200,6 +200,17 @@ async def ingest_youtube(request: YouTubeRequest):
 
             conn.commit()
 
+        # 6. Save a "Receipt" to your main backend
+        try:
+            requests.post("http://documind_backend:8080/api/documents", json={
+                "fileName": request.url,
+                "userId": 1,
+                "status": "PROCESSED"
+            })
+            logger.info("Successfully saved video receipt to database.")
+        except Exception as e:
+            logger.error(f"CRITICAL: Failed to save video receipt: {e}")
+
         return {"status": "indexed", "file_id": request.file_id}
 
     except Exception as e:
@@ -263,51 +274,43 @@ async def chat(query_data: ChatQuery):
     Question: {query_data.query}
     """
 
-# --- THE FIX: Auto-Retry Loop for Rate Limits ---
+    # --- THE FIX: Auto-Retry Loop for Rate Limits ---
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            # Try to get the answer from Gemini
             response = ai_model.generate_content(prompt)
-            break  # If it works, instantly break out of the loop!
-
+            break
         except Exception as e:
-            # If Google throws a 429 Rate Limit error...
             if "429" in str(e) or "ResourceExhausted" in str(e):
                 if attempt < max_retries - 1:
                     logger.warning(f"Hit Gemini rate limit. Pausing 30 seconds... (Attempt {attempt+1}/{max_retries})")
-                    time.sleep(30) # Wait for Google's timeout to finish
+                    time.sleep(30)
                 else:
-                    raise e # Give up if it fails 3 times in a row
+                    raise e
             else:
-                raise e # If it's a different kind of error, crash normally
+                raise e
 
     return ChatResponse(
         answer=response.text,
         sources=["Extracted from PDF Database"]
     )
 
-    # --- 3. THE MEMORY WIPER (DELETE ROUTE) ---
-    @app.delete("/api/ai/delete/{file_id}")
-    async def delete_document(file_id: int):
-        logger.info(f"Attempting to wipe memory for document ID: {file_id}")
-        try:
-            with engine.connect() as conn:
-                # 1. Delete all AI Vectors from the database
-                conn.execute(
-                    text("DELETE FROM document_chunks WHERE document_id = :doc_id"),
-                    {"doc_id": file_id}
-                )
-
-                # 2. Try to delete the receipt from the main backend table (Safe Fail)
-                try:
-                    conn.execute(text("DELETE FROM documents WHERE id = :doc_id"), {"doc_id": file_id})
-                except Exception as e:
-                    logger.warning(f"Could not delete from main documents table: {e}")
-
-                conn.commit()
-
-            return {"status": "deleted", "message": "Memory wiped successfully."}
-        except Exception as e:
-            logger.error(f"Error deleting document: {e}")
-            raise HTTPException(status_code=500, detail="Failed to delete document from AI memory.")
+# --- 3. THE MEMORY WIPER (DELETE ROUTE) ---
+@app.delete("/api/ai/delete/{file_id}")
+async def delete_document(file_id: int):
+    logger.info(f"Attempting to wipe memory for document ID: {file_id}")
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text("DELETE FROM document_chunks WHERE document_id = :doc_id"),
+                {"doc_id": file_id}
+            )
+            try:
+                conn.execute(text("DELETE FROM documents WHERE id = :doc_id"), {"doc_id": file_id})
+            except Exception as e:
+                logger.warning(f"Could not delete from main documents table: {e}")
+            conn.commit()
+        return {"status": "deleted", "message": "Memory wiped successfully."}
+    except Exception as e:
+        logger.error(f"Error deleting document: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete document from AI memory.")

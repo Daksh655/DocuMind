@@ -14,13 +14,27 @@ export default function Dashboard() {
   const fetchDocuments = async () => {
     try {
       const response = await api.get(`/documents/user/${user.userId}`);
-      setDocuments(response.data);
+
+      // Load saved YouTube videos from browser storage
+      const savedVideos = JSON.parse(localStorage.getItem('my_youtube_videos') || '[]');
+
+      // Combine them
+      setDocuments([...response.data, ...savedVideos]);
     } catch (err) {
       console.error(err);
       setError('Failed to fetch uploaded documents.');
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleUploadSuccess = (newDoc) => {
+    if (newDoc.fileName.includes('youtube.com')) {
+      // Save to browser memory
+      const saved = JSON.parse(localStorage.getItem('my_youtube_videos') || '[]');
+      localStorage.setItem('my_youtube_videos', JSON.stringify([newDoc, ...saved]));
+    }
+    setDocuments((prev) => [newDoc, ...prev]);
   };
 
   useEffect(() => {
@@ -36,9 +50,9 @@ export default function Dashboard() {
     navigate('/');
   };
 
-  const handleUploadSuccess = (newDoc) => {
-    setDocuments((prev) => [newDoc, ...prev]);
-  };
+  // const handleUploadSuccess = (newDoc) => {
+  //   setDocuments((prev) => [newDoc, ...prev]);
+  // };
 
   // --- NEW: Universal Delete Function ---
   const handleDelete = async (docId) => {
