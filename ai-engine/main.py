@@ -286,3 +286,28 @@ async def chat(query_data: ChatQuery):
         answer=response.text,
         sources=["Extracted from PDF Database"]
     )
+
+    # --- 3. THE MEMORY WIPER (DELETE ROUTE) ---
+    @app.delete("/api/ai/delete/{file_id}")
+    async def delete_document(file_id: int):
+        logger.info(f"Attempting to wipe memory for document ID: {file_id}")
+        try:
+            with engine.connect() as conn:
+                # 1. Delete all AI Vectors from the database
+                conn.execute(
+                    text("DELETE FROM document_chunks WHERE document_id = :doc_id"),
+                    {"doc_id": file_id}
+                )
+
+                # 2. Try to delete the receipt from the main backend table (Safe Fail)
+                try:
+                    conn.execute(text("DELETE FROM documents WHERE id = :doc_id"), {"doc_id": file_id})
+                except Exception as e:
+                    logger.warning(f"Could not delete from main documents table: {e}")
+
+                conn.commit()
+
+            return {"status": "deleted", "message": "Memory wiped successfully."}
+        except Exception as e:
+            logger.error(f"Error deleting document: {e}")
+            raise HTTPException(status_code=500, detail="Failed to delete document from AI memory.")

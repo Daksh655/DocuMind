@@ -81,6 +81,9 @@ export default function UploadBox({ onUploadSuccess }) {
 
       setStatus('Video memorized! You can now ask questions about it in the chat.');
       setYoutubeUrl('');
+
+      if (onUploadSuccess) onUploadSuccess({ id: Math.floor(Math.random() * 1000000), fileName: youtubeUrl, status: 'PROCESSED', uploadedAt: new Date().toISOString() });
+
     } catch (err) {
       console.error(err);
       setError('Failed to extract video. Ensure the video has Closed Captions (Subtitles) enabled.');
