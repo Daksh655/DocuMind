@@ -1,6 +1,7 @@
 import os
 import logging
 import time
+from youtube_transcript_api import YouTubeTranscriptApi
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -68,6 +69,10 @@ class ChatQuery(BaseModel):
     query: str
     user_id: int
     document_id: Optional[int] = None
+
+class YouTubeRequest(BaseModel):
+    url: str
+    file_id: int
 
 class ChatResponse(BaseModel):
     answer: str
@@ -137,6 +142,69 @@ async def ingest_document(
     pdf_bytes = await file.read()
     background_tasks.add_task(process_document_background, file_id, file.filename, pdf_bytes)
     return {"status": "indexed", "file_id": file_id}
+
+
+@app.post("/api/ai/youtube")
+async def ingest_youtube(request: YouTubeRequest):
+    logger.info(f"Raw URL received: {request.url}")
+    try:
+        # 1. Bulletproof Video ID Extraction using Regex
+        import re
+        match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11}).*", request.url)
+        if not match:
+            raise HTTPException(status_code=400, detail="Could not extract a valid YouTube ID.")
+
+        video_id = match.group(1)
+        logger.info(f"Successfully Extracted Video ID: {video_id}")
+
+        # 2. transcript 1.2.4 SYNTAX
+        ytt_api = YouTubeTranscriptApi()
+
+        try:
+            # Try grabbing English first
+            transcript = ytt_api.fetch(video_id, languages=['en', 'en-US'])
+        except Exception as e:
+            logger.warning(f"Failed to find English, trying first available: {e}")
+            # If English fails, fallback and grab the absolute first language available
+            transcript_list = ytt_api.list(video_id)
+            transcript_data = next(iter(transcript_list))
+            transcript = transcript_data.fetch()
+
+        # 3. Mash it together
+        full_text = " ".join([chunk.text for chunk in transcript])
+
+        # 4. Chop into chunks
+        chunk_size = 1000
+        chunks = [full_text[i:i+chunk_size] for i in range(0, len(full_text), chunk_size)]
+
+        # 5. Save to Database
+        with engine.connect() as conn:
+            for chunk in chunks:
+                if len(chunk.strip()) < 10:
+                    continue
+
+                embedding_result = genai.embed_content(
+                    model="models/gemini-embedding-001",
+                    content=chunk,
+                    task_type="retrieval_document",
+                    output_dimensionality=768
+                )
+
+                conn.execute(
+                    text("INSERT INTO document_chunks (document_id, content, embedding) VALUES (:doc_id, :content, :embedding)"),
+                    {"doc_id": request.file_id, "content": f"[YOUTUBE VIDEO TRANSCRIPT]: {chunk}", "embedding": str(embedding_result['embedding'])}
+                )
+
+                # Invisible throttle to protect your API key during the demo!
+                time.sleep(3.5)
+
+            conn.commit()
+
+        return {"status": "indexed", "file_id": request.file_id}
+
+    except Exception as e:
+        logger.error(f"Error processing YouTube video: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # --- 2. THE GEMINI BRAIN ---

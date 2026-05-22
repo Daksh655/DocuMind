@@ -8,3 +8,4 @@ google-generativeai
 pytesseract==0.3.10
 pdf2image==1.17.0
 Pillow==10.2.0
+youtube-transcript-api==1.2.4
