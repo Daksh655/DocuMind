@@ -1,13 +1,16 @@
 import os
 import logging
+import time
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 from sqlalchemy import create_engine, text
 import google.generativeai as genai
-from pypdf import PdfReader
 import requests
+import pytesseract  # for pdf reading
+from pdf2image import convert_from_path   # for pdf reading
+from PIL import Image  # for pdf reading
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -79,12 +82,15 @@ def process_document_background(file_id: int, file_path: str, pdf_bytes: bytes):
         with open(temp_path, "wb") as f:
             f.write(pdf_bytes)
 
-        # Read the PDF text
-        reader = PdfReader(temp_path)
+        # --- NEW OCR VISION ENGINE ---
+        # 1. Convert every page of the PDF into a high-quality image
+        pages = convert_from_path(temp_path)
         full_text = ""
-        for page in reader.pages:
-            if page.extract_text():
-                full_text += page.extract_text() + "\n"
+
+        # 2. Look at each image and extract the English text visually
+        for page in pages:
+            text = pytesseract.image_to_string(page)
+            full_text += text + "\n"
 
         # Chop text into smaller 1000-character chunks
         chunk_size = 1000
@@ -108,6 +114,7 @@ def process_document_background(file_id: int, file_path: str, pdf_bytes: bytes):
                     text("INSERT INTO document_chunks (document_id, content, embedding) VALUES (:doc_id, :content, :embedding)"),
                     {"doc_id": file_id, "content": chunk, "embedding": str(embedding_result['embedding'])}
                 )
+                time.sleep(3.5)
             conn.commit()
 
         logger.info(f"Successfully processed and embedded document ID: {file_id}")
@@ -164,22 +171,48 @@ async def chat(query_data: ChatQuery):
     # 3. Give the paragraphs and the question to Gemini to formulate an answer
     ai_model = genai.GenerativeModel('gemini-2.5-flash')
     prompt = f"""
-        You are a helpful, conversational, and intelligent assistant for the FluxWork platform.
-        Your goal is to help the user understand their uploaded document while maintaining a natural, friendly chat.
-
-    Context extracted from the document:
+    You are DocuMind, an intelligent and helpful learning assistant.
+    Your goal is to answer the user's question using ONLY the provided context extracted from their uploaded documents.
+    Context:
     {context_text}
 
-    Instructions:
-    1. Answer the user's question directly and clearly using the provided context.
-    2. Provide the exact amount of detail needed—be thorough but concise. Avoid unnecessary rambling or one-word answers.
-    3. If the context does not contain the exact answer, politely mention that it is not in the document, but use your general knowledge to provide a helpful answer anyway.
-    4. If the user asks for a summary, give a well-structured, easy-to-read overview of the main points.
+    CRITICAL INSTRUCTIONS:
+    1. Answer using clean bullet points.
+    2. You MUST end your response exactly following the "External Resources" template below.
+    3. ONLY use highly trusted, English-language websites (like w3schools, geeksforgeeks, mozilla, or official docs).
+    4. NEVER output a raw URL in plain text. Always hide it inside markdown brackets like this: [Text](URL).
+    5. NEVER output a YouTube "watch?v=" link. ONLY output YouTube search query links.
+
+    --- START TEMPLATE ---
+    [Insert your bulleted answer to the question here]
+
+    ### External Resources
+    * [Read official documentation on this topic](insert direct, verified website URL here)
+    * [Read additional guide on this topic](insert direct, verified website URL here)
+    * [Search YouTube for Video Tutorials](https://www.youtube.com/results?search_query=insert+topic+name+with+plus+signs)
+    --- END TEMPLATE ---
 
     Question: {query_data.query}
     """
 
-    response = ai_model.generate_content(prompt)
+# --- THE FIX: Auto-Retry Loop for Rate Limits ---
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            # Try to get the answer from Gemini
+            response = ai_model.generate_content(prompt)
+            break  # If it works, instantly break out of the loop!
+
+        except Exception as e:
+            # If Google throws a 429 Rate Limit error...
+            if "429" in str(e) or "ResourceExhausted" in str(e):
+                if attempt < max_retries - 1:
+                    logger.warning(f"Hit Gemini rate limit. Pausing 30 seconds... (Attempt {attempt+1}/{max_retries})")
+                    time.sleep(30) # Wait for Google's timeout to finish
+                else:
+                    raise e # Give up if it fails 3 times in a row
+            else:
+                raise e # If it's a different kind of error, crash normally
 
     return ChatResponse(
         answer=response.text,

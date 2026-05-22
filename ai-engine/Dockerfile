@@ -11,6 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy requirements first to leverage Docker build cache
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# Install system dependencies for OCR and PDF processing, scan or create text form image types
+RUN apt-get update && apt-get install -y tesseract-ocr poppler-utils && rm -rf /var/lib/apt/lists/*
 
 # Copy application source code
 COPY . .

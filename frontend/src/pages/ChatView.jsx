@@ -7,7 +7,10 @@ import ChatMessage from '../components/ChatMessage';
 export default function ChatView() {
   const [query, setQuery] = useState('');
 
-  // 1. Initialize state from localStorage or use the default greeting
+  // 1. Cooldown Timer State
+  const [cooldown, setCooldown] = useState(0);
+
+  // 2. Chat Memory Setup
   const defaultGreeting = {
     role: 'assistant',
     text: "Hello! I am DocuMind. Ask me any question, and I'll answer it strictly using the facts from your syllabus library.",
@@ -20,7 +23,6 @@ export default function ChatView() {
       try {
         return JSON.parse(savedMessages);
       } catch (e) {
-        console.error("Failed to parse chat history");
         return [defaultGreeting];
       }
     }
@@ -35,22 +37,28 @@ export default function ChatView() {
   const navigate = useNavigate();
   const chatBottomRef = useRef(null);
 
-  // 2. Auto-save to localStorage whenever messages change
+  // Auto-save chat to browser
   useEffect(() => {
     localStorage.setItem("documind_chat_history", JSON.stringify(messages));
   }, [messages]);
 
+  // Cooldown Countdown Clock
+  useEffect(() => {
+    if (cooldown > 0) {
+      const timer = setTimeout(() => setCooldown(cooldown - 1), 1000);
+      return () => clearTimeout(timer);
+    }
+  }, [cooldown]);
+
+  // Fetch Documents
   useEffect(() => {
     if (!user.userId) {
       navigate('/');
       return;
     }
-
-    // Load user's documents to filter chat if necessary
     const fetchDocs = async () => {
       try {
         const response = await api.get(`/documents/user/${user.userId}`);
-        // Only allow searching processed documents
         setDocuments(response.data.filter(d => d.status === 'PROCESSED'));
       } catch (err) {
         console.error(err);
@@ -59,12 +67,11 @@ export default function ChatView() {
     fetchDocs();
   }, [navigate, user.userId]);
 
-  // Auto-scroll chat window to bottom
+  // Auto-scroll chat
   useEffect(() => {
     chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // 3. Clear Chat Function
   const clearChat = () => {
     setMessages([defaultGreeting]);
     localStorage.removeItem("documind_chat_history");
@@ -72,15 +79,18 @@ export default function ChatView() {
 
   const handleSend = async (e) => {
     e.preventDefault();
-    if (!query.trim()) return;
+    // Block sending if empty or cooldown is active
+    if (!query.trim() || cooldown > 0) return;
 
     const userMessage = { role: 'user', text: query };
     setMessages((prev) => [...prev, userMessage]);
     setQuery('');
     setLoading(true);
 
+    // START THE COOLDOWN CLOCK!
+    setCooldown(4);
+
     try {
-      // Direct call to FastAPI server for AI responses.
       const response = await api.post('http://localhost:8000/api/ai/chat', {
         query: userMessage.text,
         user_id: parseInt(user.userId),
@@ -111,7 +121,7 @@ export default function ChatView() {
   };
 
   return (
-      <div className="min-h-screen bg-slate-950 flex flex-col">
+      <div className="h-screen overflow-hidden bg-slate-950 flex flex-col">
         {/* Navbar */}
         <nav className="glass border-b border-slate-800 px-6 py-4">
           <div className="max-w-7xl mx-auto flex justify-between items-center">
@@ -124,7 +134,6 @@ export default function ChatView() {
             </div>
 
             <div className="flex items-center space-x-4">
-              {/* Clear Chat Button */}
               <button
                   onClick={clearChat}
                   className="text-xs font-semibold text-slate-400 hover:text-white bg-slate-900 hover:bg-slate-800 border border-slate-700 px-3 py-1.5 rounded-lg transition outline-none focus:border-red-500"
@@ -132,7 +141,6 @@ export default function ChatView() {
                 Clear Chat
               </button>
 
-              {/* Document filter dropdown */}
               <div className="flex items-center space-x-3 border-l border-slate-800 pl-4">
                 <label className="text-xs text-slate-400 font-semibold uppercase tracking-wider">Focus Document:</label>
                 <select
@@ -178,18 +186,25 @@ export default function ChatView() {
                 required
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                disabled={loading}
-                className="flex-1 bg-slate-900 border border-slate-700 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-2xl px-5 py-4 text-white outline-none transition"
-                placeholder="Ask a question from your course syllabus..."
+                disabled={loading || cooldown > 0}
+                className="flex-1 bg-slate-900 border border-slate-700 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-2xl px-5 py-4 text-white outline-none transition disabled:opacity-50"
+                placeholder={cooldown > 0 ? "Cooling down..." : "Ask a question from your course syllabus..."}
             />
             <button
                 type="submit"
-                disabled={loading || !query.trim()}
-                className="bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-800 disabled:text-slate-500 text-white rounded-2xl p-4 shadow-lg transition duration-200 shrink-0"
+                disabled={loading || !query.trim() || cooldown > 0}
+                className={`rounded-2xl p-4 shadow-lg transition duration-200 shrink-0 w-14 h-14 flex items-center justify-center
+              ${loading || !query.trim() || cooldown > 0
+                    ? 'bg-slate-800 text-slate-500'
+                    : 'bg-cyan-600 hover:bg-cyan-500 text-white'}`}
             >
-              <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-              </svg>
+              {cooldown > 0 ? (
+                  <span className="text-sm font-bold animate-pulse">{cooldown}s</span>
+              ) : (
+                  <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+                  </svg>
+              )}
             </button>
           </form>
         </div>
