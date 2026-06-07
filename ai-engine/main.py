@@ -20,6 +20,7 @@ logger = logging.getLogger("ai-engine")
 # Load configuration
 DATABASE_URL = os.getenv("DATABASE_URL")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+JAVA_BACKEND_URL = os.getenv("JAVA_BACKEND_URL", "http://localhost:8080")
 
 # Configure Gemini
 if GEMINI_API_KEY:
@@ -29,7 +30,7 @@ app = FastAPI(title="DocuMind AI Engine", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -126,7 +127,7 @@ def process_document_background(file_id: int, file_path: str, pdf_bytes: bytes):
 
         # Let Java know we finished! (Optional callback loop)
         try:
-            requests.put(f"http://documind_backend:8080/api/documents/{file_id}/complete")
+            requests.put(f"{JAVA_BACKEND_URL}/api/documents/{file_id}/complete")
         except:
             pass # Ignore if Java doesn't have this endpoint yet
 
@@ -202,7 +203,7 @@ async def ingest_youtube(request: YouTubeRequest):
 
         # 6. Save a "Receipt" to your main backend
         try:
-            requests.post("http://documind_backend:8080/api/documents", json={
+            requests.post(f"{JAVA_BACKEND_URL}/api/documents", json={
                 "fileName": request.url,
                 "userId": 1,
                 "status": "PROCESSED"
